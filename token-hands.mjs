@@ -23,7 +23,7 @@
  *         виден. Высота берётся из реальной позиции bar1, поэтому учитываются
  *         uiScale и токены высотой 2+ клетки.
  *
- * v1.7.0: в настройках модуля добавлена подпись автора и ссылка на Telegram.
+ * v1.7.0: в настройках модуля добавлена подпись автора.
  *
  * v1.7.1: защита от дублей спрайтов при одновременных перерисовках.
  *
@@ -42,6 +42,8 @@
  * v1.10.0: чекбоксы «Сетка» и «Синхронизация» убраны из общих настроек и
  *          остались только в редакторе; добавлена опция «Настроить для
  *          игроков», которая раздаёт раскладку всем пользователям.
+ *
+ * v1.10.1: убраны внешние контакты из настроек модулей и манифестов.
  *
  * Контракт провайдера:
  *   {
@@ -89,7 +91,6 @@ const DEFAULT_PREVIEW_IMAGE = "icons/svg/mystery-man.svg";
 
 /** Подпись автора в настройках модуля. */
 const AUTHOR_NAME = "Чешир Шредингера";
-const AUTHOR_TELEGRAM = "https://t.me/+BKPrpQRMP7cxMWFi";
 
 /* -------------------------------------------------------------------------- */
 /*  Публичный API для предметных модулей и диагностики                        */
@@ -100,7 +101,7 @@ const _providers = [];
 
 /** Публичный API: window.tokenHands (доступен уже на init). */
 const API = {
-  version: "1.10.0",
+  version: "1.10.1",
 
   /** Подключить провайдер рук (см. контракт в шапке файла). */
   register,
@@ -688,7 +689,7 @@ function bindPrototypeOverridesSubmit(form) {
 
 /**
  * Добавляет в самый низ вкладки модуля в окне настроек мира строку
- * «Автор: …» и ссылку на Telegram. Не участвует в форме и не мешает настройкам.
+ * «Автор: …». Не участвует в форме и не мешает настройкам.
  */
 function injectSettingsCredits(app, element) {
   if (!(element instanceof HTMLElement)) return;
@@ -711,18 +712,7 @@ function injectSettingsCredits(app, element) {
   const author = document.createElement("div");
   author.textContent = `${game.i18n.localize("TOKEN-HANDS.Settings.Credits.Author")}: ${AUTHOR_NAME}`;
 
-  const link = document.createElement("a");
-  link.href = AUTHOR_TELEGRAM;
-  link.target = "_blank";
-  link.rel = "noopener noreferrer";
-  link.style.color = "inherit";
-  link.style.textDecoration = "underline";
-  const icon = document.createElement("i");
-  icon.className = "fa-brands fa-telegram";
-  icon.setAttribute("aria-hidden", "true");
-  link.append(icon, document.createTextNode(` ${game.i18n.localize("TOKEN-HANDS.Settings.Credits.Telegram")}`));
-
-  box.append(author, link);
+  box.append(author);
   section.append(box);
 }
 
