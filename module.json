@@ -1,0 +1,19 @@
+{
+  "id": "token-hands",
+  "title": "Руки на токене",
+  "description": "База для отображения того, что токен держит в руках: квадраты с иконками у нижних углов токена, клик по квадрату открывает лист предмета. Сам по себе ничего не ищет — предметные модули (pf2e-token-hands, dnd5e-token-hands) регистрируют здесь провайдеров, которые отвечают на вопрос «что держит этот актёр».",
+  "version": "1.7.2",
+  "authors": [
+    { "name": "Чешир Шредингера", "url": "https://t.me/+BKPrpQRMP7cxMWFi" }
+  ],
+  "url": "https://t.me/+BKPrpQRMP7cxMWFi",
+  "compatibility": {
+    "minimum": "13",
+    "verified": "14"
+  },
+  "esmodules": ["token-hands.mjs"],
+  "languages": [
+    { "lang": "en", "name": "English", "path": "lang/en.json" },
+    { "lang": "ru", "name": "Русский", "path": "lang/ru.json" }
+  ]
+}
