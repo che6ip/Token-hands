@@ -34,6 +34,11 @@
  *         левой/правой руки по превью токена, смена фоновой картинки, сброс
  *         и возврат к авто-расположению.
  *
+ * v1.9.0: настройка «Сдвигать руки выше HP-бара» (включена по умолчанию),
+ *         сетка в редакторе (включена) и синхронизация слотов (выключена).
+ *
+ * v1.9.1: в редакторе расположения показывается HP-бар как ориентир.
+ *
  * Контракт провайдера:
  *   {
  *     id: "pf2e",                       // уникальный ключ, для логов и диагностики
@@ -85,7 +90,7 @@ const _providers = [];
 
 /** Публичный API: window.tokenHands (доступен уже на init). */
 const API = {
-  version: "1.8.0",
+  version: "1.9.1",
 
   /** Подключить провайдер рук (см. контракт в шапке файла). */
   register,
@@ -171,6 +176,22 @@ function registerSettings() {
     scope: "client", config: true, type: Number, default: 30,
     range: { min: 15, max: 60, step: 1 },
     onChange: () => refreshAllTokens(),
+  });
+  game.settings.register(MOD_ID, "avoidBar", {
+    name: "TOKEN-HANDS.Settings.AvoidBar",
+    hint: "TOKEN-HANDS.Settings.AvoidBarHint",
+    scope: "client", config: true, type: Boolean, default: true,
+    onChange: () => refreshAllTokens(),
+  });
+  game.settings.register(MOD_ID, "layoutGrid", {
+    name: "TOKEN-HANDS.Settings.LayoutGrid",
+    hint: "TOKEN-HANDS.Settings.LayoutGridHint",
+    scope: "client", config: true, type: Boolean, default: true,
+  });
+  game.settings.register(MOD_ID, "layoutSync", {
+    name: "TOKEN-HANDS.Settings.LayoutSync",
+    hint: "TOKEN-HANDS.Settings.LayoutSyncHint",
+    scope: "client", config: true, type: Boolean, default: false,
   });
   game.settings.register(MOD_ID, "onlyInCombat", {
     name: "TOKEN-HANDS.Settings.OnlyInCombat",
@@ -446,7 +467,8 @@ function needsRender(token, w, h) {
   const alive = Array.isArray(sprites) && sprites.every((s) => !s.destroyed && s.parent === token);
   if (!alive) return true;
   if (!layout || layout.w !== w || layout.h !== h) return true;
-  if (layout.bar !== barInset(token, h)) return true;
+  const bar = game.settings.get(MOD_ID, "avoidBar") ? barInset(token, h) : 0;
+  if (layout.bar !== bar) return true;
   return false;
 }
 
@@ -633,12 +655,31 @@ function injectSettingsCredits(app, element) {
 /*  Визуальный редактор расположения слотов                                   */
 /* -------------------------------------------------------------------------- */
 
+const LAYOUT_GRID_STEP = 0.1;
+
 const LAYOUT_EDITOR_CSS = `
 .token-hands-layout { display:flex; flex-direction:column; gap:.6rem; height:100%; }
 .token-hands-layout .th-preview {
   position:relative; width:100%; max-width:420px; aspect-ratio:1; margin:0 auto;
   border:1px solid var(--color-border-light-tertiary, #7a7971); border-radius:8px; overflow:hidden;
   background:#111 center/cover no-repeat; touch-action:none; user-select:none;
+}
+.token-hands-layout .th-grid {
+  position:absolute; inset:0; pointer-events:none;
+  background-image:
+    linear-gradient(to right, rgba(217,197,131,.35) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(217,197,131,.35) 1px, transparent 1px);
+  background-size:10% 10%;
+}
+.token-hands-layout .th-grid[hidden] { display:none; }
+.token-hands-layout .th-hpbar {
+  position:absolute; left:0; right:0; bottom:0; height:8%;
+  display:flex; align-items:center; justify-content:center;
+  background:linear-gradient(#5fca5f, #2f8f2f);
+  border-top:1px solid rgba(0,0,0,.65);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.25);
+  font-size:10px; line-height:1; color:rgba(255,255,255,.9); text-shadow:0 0 2px #000;
+  pointer-events:none; user-select:none;
 }
 .token-hands-layout .th-slot {
   position:absolute; box-sizing:border-box; border-radius:18%;
@@ -648,6 +689,9 @@ const LAYOUT_EDITOR_CSS = `
 }
 .token-hands-layout .th-slot:active { cursor:grabbing; }
 .token-hands-layout .th-slot img { width:72%; height:72%; object-fit:contain; pointer-events:none; }
+.token-hands-layout .th-toggles {
+  display:flex; gap:1rem; justify-content:center; align-items:center; flex-wrap:wrap;
+}
 .token-hands-layout .th-footer {
   display:flex; gap:.5rem; justify-content:flex-end; margin-top:auto; padding-top:.5rem;
 }
@@ -679,8 +723,12 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
   #imageInput = null;
   #slots = {};
   #drag = null;
+  #gridEl = null;
+  #hpBar = null;
   #image = DEFAULT_PREVIEW_IMAGE;
   #positions = null;
+  #grid = true;
+  #sync = false;
 
   constructor(options = {}) {
     super(options);
@@ -691,6 +739,8 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
       left: this.#normalizePosition(saved.left, defaults.left),
       right: this.#normalizePosition(saved.right, defaults.right),
     };
+    this.#grid = game.settings.get(MOD_ID, "layoutGrid") !== false;
+    this.#sync = game.settings.get(MOD_ID, "layoutSync") === true;
   }
 
   #normalizePosition(value, fallback) {
@@ -714,6 +764,13 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
 
     const preview = document.createElement("div");
     preview.className = "th-preview";
+    const grid = document.createElement("div");
+    grid.className = "th-grid";
+    preview.append(grid);
+    const hpBar = document.createElement("div");
+    hpBar.className = "th-hpbar";
+    hpBar.textContent = game.i18n.localize("TOKEN-HANDS.Layout.HpBar");
+    preview.append(hpBar);
     root.append(preview);
 
     for (const side of ["left", "right"]) {
@@ -728,6 +785,24 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
       slot.append(img);
       preview.append(slot);
     }
+
+    const toggles = document.createElement("div");
+    toggles.className = "th-toggles";
+    const gridToggle = document.createElement("label");
+    gridToggle.className = "checkbox";
+    const gridInput = document.createElement("input");
+    gridInput.type = "checkbox";
+    gridInput.className = "th-grid-toggle";
+    gridToggle.append(gridInput, document.createTextNode(` ${game.i18n.localize("TOKEN-HANDS.Layout.Grid")}`));
+    const syncToggle = document.createElement("label");
+    syncToggle.className = "checkbox";
+    syncToggle.title = game.i18n.localize("TOKEN-HANDS.Layout.SyncHint");
+    const syncInput = document.createElement("input");
+    syncInput.type = "checkbox";
+    syncInput.className = "th-sync-toggle";
+    syncToggle.append(syncInput, document.createTextNode(` ${game.i18n.localize("TOKEN-HANDS.Layout.Sync")}`));
+    toggles.append(gridToggle, syncToggle);
+    root.append(toggles);
 
     const imageGroup = document.createElement("div");
     imageGroup.className = "form-group slim";
@@ -779,6 +854,27 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
       this.#image = value || DEFAULT_PREVIEW_IMAGE;
       this.#applyPreview();
     });
+
+    this.#gridEl = this.element.querySelector(".th-grid");
+    this.#hpBar = this.element.querySelector(".th-hpbar");
+    const gridToggle = this.element.querySelector(".th-grid-toggle");
+    if (gridToggle) {
+      gridToggle.checked = this.#grid;
+      gridToggle.addEventListener("change", () => {
+        this.#grid = gridToggle.checked;
+        game.settings.set(MOD_ID, "layoutGrid", this.#grid);
+        this.#applyGrid();
+      });
+    }
+    const syncToggle = this.element.querySelector(".th-sync-toggle");
+    if (syncToggle) {
+      syncToggle.checked = this.#sync;
+      syncToggle.addEventListener("change", () => {
+        this.#sync = syncToggle.checked;
+        game.settings.set(MOD_ID, "layoutSync", this.#sync);
+      });
+    }
+    this.#applyGrid();
     this.#applyPreview();
   }
 
@@ -798,10 +894,18 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
     return clamp((game.settings.get(MOD_ID, "sizePercent") ?? 30) / 100, 0.15, 0.6);
   }
 
+  /** Высота HP-бара относительно токена 1×1 (как в игре). */
+  #barFraction() {
+    const uiScale = canvas?.dimensions?.uiScale ?? 1;
+    const gridSize = Math.max(1, canvas?.grid?.size ?? 100);
+    return clamp((8 * uiScale) / gridSize, 0.03, 0.25);
+  }
+
   #applyPreview() {
     if (!this.#preview) return;
     this.#preview.style.backgroundImage = `url(${JSON.stringify(this.#image)})`;
     if (this.#imageInput) this.#imageInput.value = this.#image;
+    if (this.#hpBar) this.#hpBar.style.height = `${this.#barFraction() * 100}%`;
     const pct = this.#slotFraction();
     for (const side of ["left", "right"]) {
       const slot = this.#slots[side];
@@ -810,6 +914,10 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
       slot.style.height = `${pct * 100}%`;
       this.#placeSlot(side);
     }
+  }
+
+  #applyGrid() {
+    if (this.#gridEl) this.#gridEl.hidden = !this.#grid;
   }
 
   #placeSlot(side) {
@@ -846,10 +954,22 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
     const drag = this.#drag;
     if (!drag || event.pointerId !== drag.pointerId) return;
     const max = 1 - this.#slotFraction();
-    const x = clamp(drag.x + (event.clientX - drag.startX) / drag.width, 0, max);
-    const y = clamp(drag.y + (event.clientY - drag.startY) / drag.height, 0, max);
+    let x = drag.x + (event.clientX - drag.startX) / drag.width;
+    let y = drag.y + (event.clientY - drag.startY) / drag.height;
+    if (this.#grid) {
+      x = Math.round(x / LAYOUT_GRID_STEP) * LAYOUT_GRID_STEP;
+      y = Math.round(y / LAYOUT_GRID_STEP) * LAYOUT_GRID_STEP;
+    }
+    x = clamp(x, 0, max);
+    y = clamp(y, 0, max);
     this.#positions[drag.side] = { x, y };
     this.#placeSlot(drag.side);
+
+    if (this.#sync) {
+      const other = drag.side === "left" ? "right" : "left";
+      this.#positions[other] = { x: max - x, y };
+      this.#placeSlot(other);
+    }
   }
 
   #endDrag(event) {
@@ -957,7 +1077,7 @@ async function renderTokenHands(token) {
   if (!Number.isFinite(w) || w <= 0 || !Number.isFinite(h) || h <= 0) return;
 
   clearHandSprites(token);
-  const barOffset = barInset(token, h);
+  const barOffset = game.settings.get(MOD_ID, "avoidBar") ? barInset(token, h) : 0;
   token.handsLayout = { w, h, bar: barOffset };
 
   const hands = handsVisible(token) ? resolveTokenHands(token) : null;
