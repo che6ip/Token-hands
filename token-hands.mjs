@@ -39,6 +39,10 @@
  *
  * v1.9.1: в редакторе расположения показывается HP-бар как ориентир.
  *
+ * v1.10.0: чекбоксы «Сетка» и «Синхронизация» убраны из общих настроек и
+ *          остались только в редакторе; добавлена опция «Настроить для
+ *          игроков», которая раздаёт раскладку всем пользователям.
+ *
  * Контракт провайдера:
  *   {
  *     id: "pf2e",                       // уникальный ключ, для логов и диагностики
@@ -74,6 +78,12 @@ const PROTOTYPE_OVERRIDES_SETTING = "prototypeOverrides";
 /** Личное расположение слотов: { left: {x,y}, right: {x,y}, image: string } */
 const SLOT_LAYOUT_SETTING = "slotLayout";
 
+/** Общее расположение слотов для всех игроков (когда включена настройка ниже). */
+const WORLD_SLOT_LAYOUT_SETTING = "slotLayoutWorld";
+
+/** Применять расположение из редактора ко всем игрокам. */
+const APPLY_TO_PLAYERS_SETTING = "applyToPlayers";
+
 /** Картинка токена по умолчанию для редактора расположения. */
 const DEFAULT_PREVIEW_IMAGE = "icons/svg/mystery-man.svg";
 
@@ -90,7 +100,7 @@ const _providers = [];
 
 /** Публичный API: window.tokenHands (доступен уже на init). */
 const API = {
-  version: "1.9.1",
+  version: "1.10.0",
 
   /** Подключить провайдер рук (см. контракт в шапке файла). */
   register,
@@ -154,6 +164,7 @@ Hooks.once("init", () => {
 Hooks.once("ready", () => {
   // Предметные модули подключаются на своём init/ready; к ready их уже видно.
   adoptLegacyProviders();
+  updateLayoutMenuRestriction();
   if (_providers.length === 0) {
     console.warn(`[${MOD_ID}] не подключился ни один предметный модуль — слотов не будет.`);
     if (game.user.isGM) ui.notifications.info(game.i18n.localize("TOKEN-HANDS.NoProvider"));
@@ -186,12 +197,12 @@ function registerSettings() {
   game.settings.register(MOD_ID, "layoutGrid", {
     name: "TOKEN-HANDS.Settings.LayoutGrid",
     hint: "TOKEN-HANDS.Settings.LayoutGridHint",
-    scope: "client", config: true, type: Boolean, default: true,
+    scope: "client", config: false, type: Boolean, default: true,
   });
   game.settings.register(MOD_ID, "layoutSync", {
     name: "TOKEN-HANDS.Settings.LayoutSync",
     hint: "TOKEN-HANDS.Settings.LayoutSyncHint",
-    scope: "client", config: true, type: Boolean, default: false,
+    scope: "client", config: false, type: Boolean, default: false,
   });
   game.settings.register(MOD_ID, "onlyInCombat", {
     name: "TOKEN-HANDS.Settings.OnlyInCombat",
@@ -221,6 +232,31 @@ function registerSettings() {
   game.settings.register(MOD_ID, SLOT_LAYOUT_SETTING, {
     scope: "client", config: false, type: Object, default: {},
     onChange: () => refreshAllTokens(),
+  });
+  // Общее расположение, которое мастер может раздать всем игрокам.
+  game.settings.register(MOD_ID, WORLD_SLOT_LAYOUT_SETTING, {
+    scope: "world", config: false, type: Object, default: {},
+    onChange: () => refreshAllTokens(),
+  });
+  game.settings.register(MOD_ID, APPLY_TO_PLAYERS_SETTING, {
+    name: "TOKEN-HANDS.Settings.ApplyToPlayers",
+    hint: "TOKEN-HANDS.Settings.ApplyToPlayersHint",
+    scope: "world", config: true, type: Boolean, default: false,
+    onChange: (value) => {
+      updateLayoutMenuRestriction();
+      if (value && game.user.isGM) {
+        const world = readWorldSlotLayout();
+        if (Object.keys(world).length === 0) {
+          const client = readClientSlotLayout();
+          if (Object.keys(client).length > 0) {
+            game.settings.set(MOD_ID, WORLD_SLOT_LAYOUT_SETTING, client).catch((err) => {
+              console.error(`[${MOD_ID}] не удалось перенести раскладку в общую настройку:`, err);
+            });
+          }
+        }
+      }
+      refreshAllTokens();
+    },
   });
   game.settings.registerMenu(MOD_ID, "layoutMenu", {
     name: "TOKEN-HANDS.Settings.LayoutMenu",
@@ -406,10 +442,49 @@ function isTokenHandsEnabled(token) {
 
 const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
-/** Сохранённое личное расположение слотов; пустой объект — авто-режим. */
-function readSlotLayout() {
-  const value = game.settings.get(MOD_ID, SLOT_LAYOUT_SETTING);
+/** Приводит значение настройки к объекту раскладки. */
+function asLayoutObject(value) {
   return (value && typeof value === "object") ? value : {};
+}
+
+/** Личная раскладка пользователя. */
+function readClientSlotLayout() {
+  return asLayoutObject(game.settings.get(MOD_ID, SLOT_LAYOUT_SETTING));
+}
+
+/** Общая раскладка, заданная мастером для всех игроков. */
+function readWorldSlotLayout() {
+  return asLayoutObject(game.settings.get(MOD_ID, WORLD_SLOT_LAYOUT_SETTING));
+}
+
+/** Эффективная раскладка: общая (если включена) или личная. */
+function readSlotLayout() {
+  return game.settings.get(MOD_ID, APPLY_TO_PLAYERS_SETTING)
+    ? readWorldSlotLayout()
+    : readClientSlotLayout();
+}
+
+/** Раскладка для открытия в редакторе: пустая общая → начинаем с личной. */
+function readEditableSlotLayout() {
+  if (game.settings.get(MOD_ID, APPLY_TO_PLAYERS_SETTING)) {
+    const world = readWorldSlotLayout();
+    if (Object.keys(world).length > 0) return world;
+  }
+  return readClientSlotLayout();
+}
+
+/** В какую настройку сохранять из редактора. */
+function layoutTargetSetting() {
+  return game.settings.get(MOD_ID, APPLY_TO_PLAYERS_SETTING)
+    ? WORLD_SLOT_LAYOUT_SETTING
+    : SLOT_LAYOUT_SETTING;
+}
+
+/** При общей раскладке редактор доступен только мастеру. */
+function updateLayoutMenuRestriction() {
+  const menu = game.settings.menus?.get(`${MOD_ID}.layoutMenu`);
+  if (!menu) return;
+  menu.restricted = game.settings.get(MOD_ID, APPLY_TO_PLAYERS_SETTING) === true;
 }
 
 /** Позиции по умолчанию (нормализованные, без учёта HP-бара). */
@@ -733,7 +808,7 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
   constructor(options = {}) {
     super(options);
     const defaults = defaultSlotPositions();
-    const saved = readSlotLayout();
+    const saved = readEditableSlotLayout();
     this.#image = (typeof saved.image === "string" && saved.image) ? saved.image : DEFAULT_PREVIEW_IMAGE;
     this.#positions = {
       left: this.#normalizePosition(saved.left, defaults.left),
@@ -1004,19 +1079,34 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
 
   /** @this {HandsLayoutConfig} */
   static async #onClearLayout() {
-    await game.settings.set(MOD_ID, SLOT_LAYOUT_SETTING, {});
+    const target = layoutTargetSetting();
+    if (target === WORLD_SLOT_LAYOUT_SETTING && !game.user.isGM) {
+      ui.notifications.warn(game.i18n.localize("TOKEN-HANDS.Layout.MasterOnly"));
+      return;
+    }
+    await game.settings.set(MOD_ID, target, {});
     refreshAllTokens();
     await this.close();
   }
 
   /** @this {HandsLayoutConfig} */
   static async #onSaveLayout() {
+    const target = layoutTargetSetting();
+    if (target === WORLD_SLOT_LAYOUT_SETTING && !game.user.isGM) {
+      ui.notifications.warn(game.i18n.localize("TOKEN-HANDS.Layout.MasterOnly"));
+      return;
+    }
     const layout = {
       left: { ...this.#positions.left },
       right: { ...this.#positions.right },
       image: this.#image,
     };
-    await game.settings.set(MOD_ID, SLOT_LAYOUT_SETTING, layout);
+    // При общей раскладке мастер сохраняет её и как свою личную, чтобы
+    // после выключения опции у него осталось то же расположение.
+    if (target === WORLD_SLOT_LAYOUT_SETTING) {
+      await game.settings.set(MOD_ID, SLOT_LAYOUT_SETTING, layout);
+    }
+    await game.settings.set(MOD_ID, target, layout);
     refreshAllTokens();
     await this.close();
   }
