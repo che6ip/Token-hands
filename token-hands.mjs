@@ -30,6 +30,10 @@
  * v1.7.2: смещение снова применяется только когда HP-бар реально виден;
  *         без бара руки остаются в нижних углах.
  *
+ * v1.8.0: добавлен визуальный редактор расположения слотов: перетаскивание
+ *         левой/правой руки по превью токена, смена фоновой картинки, сброс
+ *         и возврат к авто-расположению.
+ *
  * Контракт провайдера:
  *   {
  *     id: "pf2e",                       // уникальный ключ, для логов и диагностики
@@ -62,6 +66,12 @@ const FLAG_INPUT_NAME = `flags.${FLAG_SCOPE}.${FLAG_KEY}`;
 /** Настройка глобальных переопределений прототипов: { base: bool, <actorType>: bool } */
 const PROTOTYPE_OVERRIDES_SETTING = "prototypeOverrides";
 
+/** Личное расположение слотов: { left: {x,y}, right: {x,y}, image: string } */
+const SLOT_LAYOUT_SETTING = "slotLayout";
+
+/** Картинка токена по умолчанию для редактора расположения. */
+const DEFAULT_PREVIEW_IMAGE = "icons/svg/mystery-man.svg";
+
 /** Подпись автора в настройках модуля. */
 const AUTHOR_NAME = "Чешир Шредингера";
 const AUTHOR_TELEGRAM = "https://t.me/+BKPrpQRMP7cxMWFi";
@@ -75,7 +85,7 @@ const _providers = [];
 
 /** Публичный API: window.tokenHands (доступен уже на init). */
 const API = {
-  version: "1.7.2",
+  version: "1.8.0",
 
   /** Подключить провайдер рук (см. контракт в шапке файла). */
   register,
@@ -185,6 +195,19 @@ function registerSettings() {
   game.settings.register(MOD_ID, PROTOTYPE_OVERRIDES_SETTING, {
     scope: "world", config: false, type: Object, default: {},
     onChange: () => refreshAllTokens(),
+  });
+  // Личное расположение слотов (редактируется визуально).
+  game.settings.register(MOD_ID, SLOT_LAYOUT_SETTING, {
+    scope: "client", config: false, type: Object, default: {},
+    onChange: () => refreshAllTokens(),
+  });
+  game.settings.registerMenu(MOD_ID, "layoutMenu", {
+    name: "TOKEN-HANDS.Settings.LayoutMenu",
+    label: "TOKEN-HANDS.Settings.LayoutMenuLabel",
+    hint: "TOKEN-HANDS.Settings.LayoutMenuHint",
+    icon: "fa-solid fa-arrows-up-down-left-right",
+    type: HandsLayoutConfig,
+    restricted: false,
   });
 }
 
@@ -358,6 +381,38 @@ function isTokenHandsEnabled(token) {
   const override = prototypeOverrideFor(token?.actor);
   if (override !== undefined) return override;
   return true;
+}
+
+const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+
+/** Сохранённое личное расположение слотов; пустой объект — авто-режим. */
+function readSlotLayout() {
+  const value = game.settings.get(MOD_ID, SLOT_LAYOUT_SETTING);
+  return (value && typeof value === "object") ? value : {};
+}
+
+/** Позиции по умолчанию (нормализованные, без учёта HP-бара). */
+function defaultSlotPositions() {
+  const pct = clamp((game.settings.get(MOD_ID, "sizePercent") ?? 30) / 100, 0.15, 0.6);
+  const pad = 0.02;
+  return {
+    left: { x: pad, y: 1 - pct - pad },
+    right: { x: 1 - pct - pad, y: 1 - pct - pad },
+  };
+}
+
+/** Позиция слота в пикселях токена: пользовательская или автоматическая. */
+function slotPosition(token, side, layout, w, h, size, pad, barOffset) {
+  const saved = layout?.[side];
+  const defaultX = side === "left" ? pad : w - size - pad;
+  const baseX = saved && Number.isFinite(saved.x) ? Math.round(saved.x * w) : defaultX;
+  const baseY = saved && Number.isFinite(saved.y) ? Math.round(saved.y * h) : h - size - pad;
+  const maxX = Math.max(0, w - size);
+  const maxY = Math.max(0, h - size - pad - barOffset);
+  return {
+    x: clamp(baseX, 0, maxX),
+    y: Math.min(clamp(baseY, 0, h - size), maxY),
+  };
 }
 
 /** Видимость слотов: личный переключатель, «только в бою» и участие в инициативе. */
@@ -574,6 +629,279 @@ function injectSettingsCredits(app, element) {
   section.append(box);
 }
 
+/* -------------------------------------------------------------------------- */
+/*  Визуальный редактор расположения слотов                                   */
+/* -------------------------------------------------------------------------- */
+
+const LAYOUT_EDITOR_CSS = `
+.token-hands-layout { display:flex; flex-direction:column; gap:.6rem; height:100%; }
+.token-hands-layout .th-preview {
+  position:relative; width:100%; max-width:420px; aspect-ratio:1; margin:0 auto;
+  border:1px solid var(--color-border-light-tertiary, #7a7971); border-radius:8px; overflow:hidden;
+  background:#111 center/cover no-repeat; touch-action:none; user-select:none;
+}
+.token-hands-layout .th-slot {
+  position:absolute; box-sizing:border-box; border-radius:18%;
+  background:rgba(14,14,20,.62); border:2px solid rgba(217,197,131,.85);
+  box-shadow:inset 0 0 0 1px rgba(0,0,0,.4), 0 2px 6px rgba(0,0,0,.45);
+  display:flex; align-items:center; justify-content:center; cursor:grab; touch-action:none;
+}
+.token-hands-layout .th-slot:active { cursor:grabbing; }
+.token-hands-layout .th-slot img { width:72%; height:72%; object-fit:contain; pointer-events:none; }
+.token-hands-layout .th-footer {
+  display:flex; gap:.5rem; justify-content:flex-end; margin-top:auto; padding-top:.5rem;
+}
+.token-hands-layout .th-footer button { flex:0 0 auto; }
+`;
+
+/** Окно визуальной настройки положения слотов рук на токене. */
+class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
+  static DEFAULT_OPTIONS = {
+    id: "token-hands-layout-config",
+    tag: "div",
+    classes: ["token-hands-layout-config"],
+    window: {
+      title: "TOKEN-HANDS.Layout.Title",
+      icon: "fa-solid fa-arrows-up-down-left-right",
+      resizable: false,
+      contentClasses: ["standard-form"],
+    },
+    position: { width: 540, height: 700 },
+    actions: {
+      browseImage: HandsLayoutConfig.#onBrowseImage,
+      resetLayout: HandsLayoutConfig.#onResetLayout,
+      clearLayout: HandsLayoutConfig.#onClearLayout,
+      saveLayout: HandsLayoutConfig.#onSaveLayout,
+    },
+  };
+
+  #preview = null;
+  #imageInput = null;
+  #slots = {};
+  #drag = null;
+  #image = DEFAULT_PREVIEW_IMAGE;
+  #positions = null;
+
+  constructor(options = {}) {
+    super(options);
+    const defaults = defaultSlotPositions();
+    const saved = readSlotLayout();
+    this.#image = (typeof saved.image === "string" && saved.image) ? saved.image : DEFAULT_PREVIEW_IMAGE;
+    this.#positions = {
+      left: this.#normalizePosition(saved.left, defaults.left),
+      right: this.#normalizePosition(saved.right, defaults.right),
+    };
+  }
+
+  #normalizePosition(value, fallback) {
+    if (!value || !Number.isFinite(value.x) || !Number.isFinite(value.y)) return { ...fallback };
+    return { x: clamp(value.x, 0, 1), y: clamp(value.y, 0, 1) };
+  }
+
+  /** @override */
+  async _renderHTML() {
+    const root = document.createElement("div");
+    root.className = "token-hands-layout";
+
+    const style = document.createElement("style");
+    style.textContent = LAYOUT_EDITOR_CSS;
+    root.append(style);
+
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = game.i18n.localize("TOKEN-HANDS.Layout.Hint");
+    root.append(hint);
+
+    const preview = document.createElement("div");
+    preview.className = "th-preview";
+    root.append(preview);
+
+    for (const side of ["left", "right"]) {
+      const slot = document.createElement("div");
+      slot.className = "th-slot";
+      slot.dataset.side = side;
+      slot.title = game.i18n.localize(`TOKEN-HANDS.Layout.${side === "left" ? "Left" : "Right"}`);
+      const img = document.createElement("img");
+      img.src = side === "left" ? "icons/svg/shield.svg" : "icons/svg/sword.svg";
+      img.alt = "";
+      img.draggable = false;
+      slot.append(img);
+      preview.append(slot);
+    }
+
+    const imageGroup = document.createElement("div");
+    imageGroup.className = "form-group slim";
+    const imageLabel = document.createElement("label");
+    imageLabel.textContent = game.i18n.localize("TOKEN-HANDS.Layout.Image");
+    const imageFields = document.createElement("div");
+    imageFields.className = "form-fields";
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "th-image-path";
+    input.placeholder = DEFAULT_PREVIEW_IMAGE;
+    const browse = this.#makeButton("browseImage", "fa-solid fa-folder-open", "TOKEN-HANDS.Layout.Browse");
+    imageFields.append(input, browse);
+    imageGroup.append(imageLabel, imageFields);
+    root.append(imageGroup);
+
+    const footer = document.createElement("footer");
+    footer.className = "th-footer";
+    footer.append(
+      this.#makeButton("resetLayout", "fa-solid fa-arrow-rotate-left", "TOKEN-HANDS.Layout.Reset"),
+      this.#makeButton("clearLayout", "fa-solid fa-wand-magic-sparkles", "TOKEN-HANDS.Layout.Clear"),
+      this.#makeButton("saveLayout", "fa-solid fa-floppy-disk", "TOKEN-HANDS.Layout.Save", true),
+    );
+    root.append(footer);
+    return root;
+  }
+
+  /** @override */
+  _replaceHTML(result, content, _options) {
+    content.replaceChildren(result);
+  }
+
+  /** @override */
+  async _onRender(context, options) {
+    await super._onRender(context, options);
+    this.#preview = this.element.querySelector(".th-preview");
+    this.#imageInput = this.element.querySelector(".th-image-path");
+    this.#slots = {};
+    for (const slot of this.element.querySelectorAll(".th-slot")) {
+      const side = slot.dataset.side;
+      this.#slots[side] = slot;
+      slot.addEventListener("pointerdown", (event) => this.#startDrag(side, event));
+      slot.addEventListener("pointermove", (event) => this.#moveDrag(event));
+      slot.addEventListener("pointerup", (event) => this.#endDrag(event));
+      slot.addEventListener("pointercancel", (event) => this.#endDrag(event));
+    }
+    this.#imageInput?.addEventListener("change", () => {
+      const value = this.#imageInput.value.trim();
+      this.#image = value || DEFAULT_PREVIEW_IMAGE;
+      this.#applyPreview();
+    });
+    this.#applyPreview();
+  }
+
+  #makeButton(action, iconClass, labelKey, primary = false) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.action = action;
+    if (primary) button.classList.add("default");
+    const icon = document.createElement("i");
+    icon.className = iconClass;
+    icon.setAttribute("aria-hidden", "true");
+    button.append(icon, document.createTextNode(` ${game.i18n.localize(labelKey)}`));
+    return button;
+  }
+
+  #slotFraction() {
+    return clamp((game.settings.get(MOD_ID, "sizePercent") ?? 30) / 100, 0.15, 0.6);
+  }
+
+  #applyPreview() {
+    if (!this.#preview) return;
+    this.#preview.style.backgroundImage = `url(${JSON.stringify(this.#image)})`;
+    if (this.#imageInput) this.#imageInput.value = this.#image;
+    const pct = this.#slotFraction();
+    for (const side of ["left", "right"]) {
+      const slot = this.#slots[side];
+      if (!slot) continue;
+      slot.style.width = `${pct * 100}%`;
+      slot.style.height = `${pct * 100}%`;
+      this.#placeSlot(side);
+    }
+  }
+
+  #placeSlot(side) {
+    const slot = this.#slots[side];
+    const position = this.#positions?.[side];
+    if (!slot || !position) return;
+    const max = 1 - this.#slotFraction();
+    const x = clamp(position.x, 0, max);
+    const y = clamp(position.y, 0, max);
+    this.#positions[side] = { x, y };
+    slot.style.left = `${x * 100}%`;
+    slot.style.top = `${y * 100}%`;
+  }
+
+  #startDrag(side, event) {
+    if (event.button !== 0 || !this.#preview) return;
+    event.preventDefault();
+    const rect = this.#preview.getBoundingClientRect();
+    const position = this.#positions[side];
+    this.#drag = {
+      side,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      x: position.x,
+      y: position.y,
+      width: Math.max(1, rect.width),
+      height: Math.max(1, rect.height),
+    };
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }
+
+  #moveDrag(event) {
+    const drag = this.#drag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    const max = 1 - this.#slotFraction();
+    const x = clamp(drag.x + (event.clientX - drag.startX) / drag.width, 0, max);
+    const y = clamp(drag.y + (event.clientY - drag.startY) / drag.height, 0, max);
+    this.#positions[drag.side] = { x, y };
+    this.#placeSlot(drag.side);
+  }
+
+  #endDrag(event) {
+    const drag = this.#drag;
+    if (!drag || event.pointerId !== drag.pointerId) return;
+    this.#drag = null;
+    try {
+      event.currentTarget.releasePointerCapture?.(event.pointerId);
+    } catch (err) { /* уже отпущено */ }
+  }
+
+  /** @this {HandsLayoutConfig} */
+  static #onBrowseImage() {
+    new foundry.applications.apps.FilePicker({
+      type: "image",
+      current: this.#image,
+      callback: (path) => {
+        if (!path) return;
+        this.#image = path;
+        this.#applyPreview();
+      },
+    }).render(true);
+  }
+
+  /** @this {HandsLayoutConfig} */
+  static #onResetLayout() {
+    const defaults = defaultSlotPositions();
+    this.#image = DEFAULT_PREVIEW_IMAGE;
+    this.#positions = { left: { ...defaults.left }, right: { ...defaults.right } };
+    this.#applyPreview();
+  }
+
+  /** @this {HandsLayoutConfig} */
+  static async #onClearLayout() {
+    await game.settings.set(MOD_ID, SLOT_LAYOUT_SETTING, {});
+    refreshAllTokens();
+    await this.close();
+  }
+
+  /** @this {HandsLayoutConfig} */
+  static async #onSaveLayout() {
+    const layout = {
+      left: { ...this.#positions.left },
+      right: { ...this.#positions.right },
+      image: this.#image,
+    };
+    await game.settings.set(MOD_ID, SLOT_LAYOUT_SETTING, layout);
+    refreshAllTokens();
+    await this.close();
+  }
+}
+
 const _pendingActors = new Set();
 let _flushQueued = false;
 
@@ -638,10 +966,10 @@ async function renderTokenHands(token) {
   const sizePct = (game.settings.get(MOD_ID, "sizePercent") ?? 30) / 100;
   const size = Math.round(Math.max(14, Math.min(w * sizePct, 150)));
   const pad = Math.max(1, Math.round(w * 0.02));
-  const y = h - size - pad - barOffset;
+  const layout = readSlotLayout();
   const pos = {
-    left:  { x: pad, y },
-    right: { x: w - size - pad, y },
+    left: slotPosition(token, "left", layout, w, h, size, pad, barOffset),
+    right: slotPosition(token, "right", layout, w, h, size, pad, barOffset),
   };
 
   const sprites = [];
