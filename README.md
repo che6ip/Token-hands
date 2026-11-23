@@ -14,6 +14,7 @@
 
 - [**D&D 5e**](https://github.com/che6ip/Token-hands-DnD5e)
 - [**Pathfinder 2e**](https://github.com/che6ip/Token-hands-PF2e)
+- [**Pathfinder 1e**](https://github.com/che6ip/Token-hands-Pf1e)
 - [**Cyberpunk RED**](https://github.com/che6ip/Token-hands-RED)
 - Нужна другая система? Пишите!
 
