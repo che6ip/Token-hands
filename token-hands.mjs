@@ -45,19 +45,43 @@
  *
  * v1.10.1: убраны внешние контакты из настроек модулей и манифестов.
  *
+ * v1.11.0: поддержка произвольного числа слотов. Провайдер может вернуть массив
+ *          слотов (или { slots: [...] }) — база сама раскладывает их сеткой,
+ *          если рук больше двух. Старый контракт { left, right } продолжает
+ *          работать без изменений.
+ *
+ * v1.12.0: дополнительные руки раскладываются в верхних углах, а в редакторе
+ *          расположения появилась кнопка «Добавить слот» для систем с
+ *          дополнительными руками (Cyberpunk RED).
+ *
+ * v1.12.1: перерисовка после смены активных эффектов и надёжный планировщик
+ *          обновлений (setTimeout вместо requestAnimationFrame).
+ *
+ * v1.12.2: в редакторе расположения добавлена кнопка «Удалить слот» для
+ *          дополнительных рук.
+ *
+ * v1.13.0: провайдер может обрабатывать ПКМ по слоту через onSlotContextMenu
+ *          (например, выбор предмета из инвентаря для пустой руки).
+ *
+ * v1.13.1: ПКМ больше не открывает карточку предмета — только меню провайдера.
+ *
  * Контракт провайдера:
  *   {
  *     id: "pf2e",                       // уникальный ключ, для логов и диагностики
- *     resolveHands(actor) => hands,     // руки актёра или null
+ *     resolveHands(actor, token) => hands, // руки актёра или null
+ *     resolveSlots?(actor, token) => slots, // массив слотов для 3+ рук
+ *     onSlotContextMenu?(event, slot, token) => boolean|void, // ПКМ по слоту
  *     iconFallbacks?: string[],         // запасные пути иконок (по приоритету)
- *     hands?: { left: slot|null, right: slot|null } | null   // явные слоты вместо resolveHands
+ *     hands?: { left: slot|null, right: slot|null } | null,  // явные слоты
+ *     slots?: slot[] | null             // явный массив слотов
  *   }
- *   slot = { img, name, item?, dim?, fallbacks? }
+ *   slot = { key?, img, name, item?, dim?, fallbacks? }
+ *     key  — стабильный ключ слота (left/right/hand2…); нужен для раскладки;
  *     img  — путь к иконке; item — документ предмета, чей лист откроется по клику;
  *     dim  — затемнённая/полупрозрачная иконка (вторая рука двуручного оружия);
  *     fallbacks — дополнительные пути иконок именно для этого слота.
- *   resolveHands возвращает null, когда провайдер не берёт этого актёра на себя:
- *   тогда пробуется следующий провайдер (например PF2e-модуль в мире D&D 5e).
+ *   resolveHands/resolveSlots возвращают null, когда провайдер не берёт этого
+ *   актёра на себя: тогда пробуется следующий провайдер.
  *
  * Плоская модель отрисовки: спрайты слотов добавляются прямо в токен, без
  * промежуточных контейнеров — так они не зависят от того, как система
@@ -101,7 +125,7 @@ const _providers = [];
 
 /** Публичный API: window.tokenHands (доступен уже на init). */
 const API = {
-  version: "1.10.1",
+  version: "1.13.1",
 
   /** Подключить провайдер рук (см. контракт в шапке файла). */
   register,
@@ -290,8 +314,10 @@ function register(provider) {
     console.warn(`[${MOD_ID}] register: у провайдера нет id`);
     return false;
   }
-  if (typeof provider.resolveHands !== "function" && !provider.hands) {
-    console.warn(`[${MOD_ID}] register «${id}»: нет ни resolveHands(), ни hands`);
+  if (typeof provider.resolveHands !== "function"
+    && typeof provider.resolveSlots !== "function"
+    && !provider.hands && !provider.slots) {
+    console.warn(`[${MOD_ID}] register «${id}»: нет ни resolveHands()/resolveSlots(), ни hands/slots`);
     return false;
   }
   const existing = _providers.findIndex((p) => p.id === id);
@@ -316,19 +342,74 @@ function resolveTokenHands(token) {
   if (!token?.actor) return null;
   adoptLegacyProviders(); // предметный модуль мог подключиться позже ready
   for (const provider of _providers) {
-    let hands = null;
+    let raw = null;
     try {
-      hands = provider.hands ?? provider.resolveHands?.(token.actor) ?? null;
+      raw = provider.hands
+        ?? provider.slots
+        ?? provider.resolveSlots?.(token.actor, token)
+        ?? provider.resolveHands?.(token.actor, token)
+        ?? null;
     } catch (err) {
       console.warn(`[${MOD_ID}] провайдер «${provider.id}» ошибся: ${err.message}`);
       continue;
     }
-    if (!hands) continue; // провайдер не берёт этого актёра → пробуем следующего
-    const left = normalizeSlot(hands.left, provider);
-    const right = normalizeSlot(hands.right, provider);
-    if (left || right) return { left, right, providerId: provider.id };
+    if (!raw) continue; // провайдер не берёт этого актёра → пробуем следующего
+    const slots = normalizeSlots(raw, provider);
+    if (slots.length === 0) continue;
+    // left/right оставляем для совместимости с диагностикой и старыми вызовами API.
+    return {
+      slots,
+      left: slots[0] ?? null,
+      right: slots[1] ?? null,
+      providerId: provider.id,
+    };
   }
   return null;
+}
+
+/**
+ * Привести ответ провайдера к массиву слотов.
+ * Поддерживаются: массив, { slots: [...] } и старый вид { left, right }.
+ */
+function normalizeSlots(raw, provider) {
+  const list = Array.isArray(raw)
+    ? raw
+    : (Array.isArray(raw?.slots) ? raw.slots : null);
+  const slots = [];
+
+  if (list) {
+    list.forEach((slot, index) => {
+      const normalized = normalizeSlot(slot, provider);
+      if (!normalized) return;
+      normalized.key = String(
+        slot?.key ?? (index === 0 ? "left" : index === 1 ? "right" : `hand${index}`)
+      );
+      slots.push(normalized);
+    });
+  } else {
+    const left = normalizeSlot(raw?.left, provider);
+    const right = normalizeSlot(raw?.right, provider);
+    if (left) {
+      left.key = "left";
+      slots.push(left);
+    }
+    if (right) {
+      right.key = "right";
+      slots.push(right);
+    }
+  }
+
+  // Ключи должны быть уникальными: иначе раскладка и спрайты будут конфликтовать.
+  const used = new Set();
+  for (const slot of slots) {
+    const base = slot.key || "hand";
+    let key = base;
+    let suffix = 2;
+    while (used.has(key)) key = `${base}-${suffix++}`;
+    used.add(key);
+    slot.key = key;
+  }
+  return slots;
 }
 
 /** Привести слот от провайдера к внутреннему виду; null — слота нет. */
@@ -343,6 +424,9 @@ function normalizeSlot(slot, provider) {
     item,
     dim: !!slot.dim,
     fallbacks: [...(slot.fallbacks ?? []), ...(provider?.iconFallbacks ?? [])].filter(Boolean),
+    contextMenu: typeof provider?.onSlotContextMenu === "function"
+      ? (event, slotData, token) => provider.onSlotContextMenu(event, slotData, token)
+      : null,
   };
 }
 
@@ -356,7 +440,10 @@ function registerHooks() {
     if (needsRender(token, w, h)) renderTokenHands(token);
   });
 
-  Hooks.on("canvasReady", () => refreshAllTokens());
+  Hooks.on("canvasReady", () => {
+    _flushQueued = false;
+    refreshAllTokens();
+  });
 
   Hooks.on("createToken", (doc) => {
     if (doc.object) renderTokenHands(doc.object);
@@ -370,8 +457,11 @@ function registerHooks() {
   });
 
   // Личный переключатель прототипа токена: обновляем все токены этого актёра.
+  // Любое другое изменение актёра (эффекты, бонусы рук, установленная кибернетика)
+  // перерисовывает только его токены.
   Hooks.on("updateActor", (actor, changes) => {
     if ("prototypeToken" in changes) refreshAllTokens();
+    else scheduleRefresh(actor);
   });
 
   // Поле «Руки на токене» в окнах настройки токена и прототипа токена.
@@ -388,6 +478,24 @@ function registerHooks() {
   Hooks.on("createItem", onItemChange);
   Hooks.on("updateItem", onItemChange);
   Hooks.on("deleteItem", onItemChange);
+
+  // Активные эффекты меняют число рук (bonuses.hands), но не всегда вызывают
+  // updateActor. Перерисовываем токены актёра сразу, не дожидаясь планировщика.
+  const onEffectChange = (effect) => {
+    const parent = effect?.parent ?? null;
+    const actor = parent?.documentName === "Actor"
+      ? parent
+      : (parent?.actor ?? effect?.actor ?? null);
+    if (!actor?.id) return;
+    for (const token of placedTokens()) {
+      if (token.actor?.id === actor.id || token.document?.actorId === actor.id) {
+        renderTokenHands(token);
+      }
+    }
+  };
+  Hooks.on("createActiveEffect", onEffectChange);
+  Hooks.on("updateActiveEffect", onEffectChange);
+  Hooks.on("deleteActiveEffect", onEffectChange);
 
   // Слоты только для участников боя: следим за составом инициативы
   let lastCombatSignature = null;
@@ -488,14 +596,85 @@ function updateLayoutMenuRestriction() {
   menu.restricted = game.settings.get(MOD_ID, APPLY_TO_PLAYERS_SETTING) === true;
 }
 
-/** Позиции по умолчанию (нормализованные, без учёта HP-бара). */
-function defaultSlotPositions() {
-  const pct = clamp((game.settings.get(MOD_ID, "sizePercent") ?? 30) / 100, 0.15, 0.6);
-  const pad = 0.02;
-  return {
-    left: { x: pad, y: 1 - pct - pad },
-    right: { x: 1 - pct - pad, y: 1 - pct - pad },
-  };
+/**
+ * Подобрать размер слота так, чтобы дополнительные руки помещались
+ * в верхних углах, а основные — в нижних.
+ */
+function fitSlotSize(count, w, h, size, pad, barOffset) {
+  if (count <= 2) return size;
+
+  const extraRows = Math.ceil(Math.max(0, count - 2) / 2);
+  const rows = extraRows + 1; // верхние ряды дополнительных рук + нижний ряд
+  let current = size;
+
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const gap = Math.max(2, Math.round(current * 0.08));
+    const availableHeight = Math.max(1, h - pad * 2 - barOffset);
+    const availableWidth = Math.max(1, w - pad * 2);
+    const maxByHeight = (availableHeight - (rows - 1) * gap) / rows;
+    const maxByWidth = (availableWidth - gap) / 2;
+    const next = Math.max(10, Math.floor(Math.min(current, maxByHeight, maxByWidth)));
+    if (next >= current - 1) break;
+    current = next;
+  }
+
+  return current;
+}
+
+/**
+ * Раскладка слотов: основные руки — в нижних углах, дополнительные —
+ * в верхних углах, попарно слева и справа. Если дополнительных рук больше
+ * двух, пары идут вниз от верхних углов.
+ */
+function autoSlotPositions(slots, w, h, size, pad, barOffset) {
+  const positions = new Array(slots.length);
+  if (slots.length === 0) return positions;
+
+  const gap = Math.max(2, Math.round(size * 0.08));
+  let leftIndex = slots.findIndex((slot) => slot.key === "left");
+  let rightIndex = slots.findIndex((slot) => slot.key === "right");
+
+  // Провайдер без ключей left/right: первые два слота считаем основными.
+  if (leftIndex === -1 && rightIndex === -1) {
+    leftIndex = 0;
+    rightIndex = slots.length > 1 ? 1 : -1;
+  }
+
+  const extra = slots
+    .map((slot, index) => ({ slot, index }))
+    .filter(({ index }) => index !== leftIndex && index !== rightIndex)
+    .sort((a, b) => {
+      const numberA = /^hand(\d+)$/.exec(a.slot.key ?? "")?.[1];
+      const numberB = /^hand(\d+)$/.exec(b.slot.key ?? "")?.[1];
+      if (numberA !== undefined && numberB !== undefined) return Number(numberA) - Number(numberB);
+      return a.index - b.index;
+    });
+
+  const maxX = Math.max(0, w - size);
+  const maxY = Math.max(0, h - size);
+
+  // Дополнительные руки: 1-я — слева вверху, 2-я — справа вверху, далее вниз.
+  extra.forEach(({ index }, order) => {
+    const row = Math.floor(order / 2);
+    const onRight = order % 2 === 1;
+    positions[index] = {
+      x: onRight ? maxX : Math.min(pad, maxX),
+      y: clamp(pad + row * (size + gap), 0, maxY),
+    };
+  });
+
+  const bottomY = clamp(h - size - pad - barOffset, 0, maxY);
+  if (leftIndex !== -1) positions[leftIndex] = { x: Math.min(pad, maxX), y: bottomY };
+  if (rightIndex !== -1) positions[rightIndex] = { x: maxX, y: bottomY };
+
+  // Страховка для нестандартных наборов слотов.
+  for (let index = 0; index < positions.length; index += 1) {
+    if (!positions[index]) {
+      positions[index] = { x: Math.min(pad, maxX), y: bottomY };
+    }
+  }
+
+  return positions;
 }
 
 /** Позиция слота в пикселях токена: пользовательская или автоматическая. */
@@ -721,6 +900,13 @@ function injectSettingsCredits(app, element) {
 /* -------------------------------------------------------------------------- */
 
 const LAYOUT_GRID_STEP = 0.1;
+const MAX_EXTRA_SLOTS = 10;
+const EXTRA_SLOT_SYSTEM = "cyberpunk-red-core";
+
+/** Кнопка «Добавить слот» нужна только системам с дополнительными руками. */
+function supportsExtraSlots() {
+  return game.system?.id === EXTRA_SLOT_SYSTEM;
+}
 
 const LAYOUT_EDITOR_CSS = `
 .token-hands-layout { display:flex; flex-direction:column; gap:.6rem; height:100%; }
@@ -758,7 +944,7 @@ const LAYOUT_EDITOR_CSS = `
   display:flex; gap:1rem; justify-content:center; align-items:center; flex-wrap:wrap;
 }
 .token-hands-layout .th-footer {
-  display:flex; gap:.5rem; justify-content:flex-end; margin-top:auto; padding-top:.5rem;
+  display:flex; flex-wrap:wrap; gap:.5rem; justify-content:flex-end; margin-top:auto; padding-top:.5rem;
 }
 .token-hands-layout .th-footer button { flex:0 0 auto; }
 `;
@@ -778,6 +964,8 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
     position: { width: 540, height: 700 },
     actions: {
       browseImage: HandsLayoutConfig.#onBrowseImage,
+      addSlot: HandsLayoutConfig.#onAddSlot,
+      removeSlot: HandsLayoutConfig.#onRemoveSlot,
       resetLayout: HandsLayoutConfig.#onResetLayout,
       clearLayout: HandsLayoutConfig.#onClearLayout,
       saveLayout: HandsLayoutConfig.#onSaveLayout,
@@ -791,21 +979,67 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
   #gridEl = null;
   #hpBar = null;
   #image = DEFAULT_PREVIEW_IMAGE;
-  #positions = null;
+  #positions = {};
+  #extraSlots = 0;
   #grid = true;
   #sync = false;
 
   constructor(options = {}) {
     super(options);
-    const defaults = defaultSlotPositions();
     const saved = readEditableSlotLayout();
+    const savedKeys = Object.keys(saved).filter(
+      (key) => key === "left" || key === "right" || /^hand\d+$/.test(key)
+    );
+    const maxHand = savedKeys.reduce((max, key) => {
+      if (!key.startsWith("hand")) return max;
+      const number = Number(key.slice(4));
+      return Number.isFinite(number) ? Math.max(max, number) : max;
+    }, 1);
+    this.#extraSlots = Math.max(0, Math.min(MAX_EXTRA_SLOTS, maxHand - 1));
+
     this.#image = (typeof saved.image === "string" && saved.image) ? saved.image : DEFAULT_PREVIEW_IMAGE;
-    this.#positions = {
-      left: this.#normalizePosition(saved.left, defaults.left),
-      right: this.#normalizePosition(saved.right, defaults.right),
-    };
+    for (const key of this.#slotKeys()) {
+      this.#positions[key] = this.#normalizePosition(saved[key], this.#defaultPositionForKey(key));
+    }
     this.#grid = game.settings.get(MOD_ID, "layoutGrid") !== false;
     this.#sync = game.settings.get(MOD_ID, "layoutSync") === true;
+  }
+
+  /** Ключи слотов в редакторе: left/right и дополнительные hand2…handN. */
+  #slotKeys() {
+    const keys = ["left", "right"];
+    for (let index = 0; index < this.#extraSlots; index += 1) {
+      keys.push(`hand${index + 2}`);
+    }
+    return keys;
+  }
+
+  /** Позиция по умолчанию: основные руки внизу, дополнительные — в верхних углах. */
+  #defaultPositionForKey(key) {
+    const pct = this.#slotFraction();
+    const pad = 0.02;
+    if (key === "left") return { x: pad, y: 1 - pct - pad };
+    if (key === "right") return { x: 1 - pct - pad, y: 1 - pct - pad };
+
+    const number = Number(String(key).replace("hand", ""));
+    const order = Math.max(0, (Number.isFinite(number) ? number : 2) - 2);
+    const row = Math.floor(order / 2);
+    const onRight = order % 2 === 1;
+    const gap = pct * 0.08;
+    return {
+      x: onRight ? 1 - pct - pad : pad,
+      y: pad + row * (pct + gap),
+    };
+  }
+
+  /** Парный слот для зеркальной синхронизации. */
+  #syncKey(key) {
+    if (key === "left") return "right";
+    if (key === "right") return "left";
+    const match = /^hand(\d+)$/.exec(key);
+    if (!match) return null;
+    const number = Number(match[1]);
+    return number % 2 === 0 ? `hand${number + 1}` : `hand${number - 1}`;
   }
 
   #normalizePosition(value, fallback) {
@@ -838,13 +1072,19 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
     preview.append(hpBar);
     root.append(preview);
 
-    for (const side of ["left", "right"]) {
+    for (const key of this.#slotKeys()) {
       const slot = document.createElement("div");
       slot.className = "th-slot";
-      slot.dataset.side = side;
-      slot.title = game.i18n.localize(`TOKEN-HANDS.Layout.${side === "left" ? "Left" : "Right"}`);
+      slot.dataset.slotKey = key;
+      if (key === "left") slot.title = game.i18n.localize("TOKEN-HANDS.Layout.Left");
+      else if (key === "right") slot.title = game.i18n.localize("TOKEN-HANDS.Layout.Right");
+      else {
+        slot.title = game.i18n.format("TOKEN-HANDS.Layout.ExtraSlot", {
+          n: Number(key.slice(4)) - 1,
+        });
+      }
       const img = document.createElement("img");
-      img.src = side === "left" ? "icons/svg/shield.svg" : "icons/svg/sword.svg";
+      img.src = key === "left" ? "icons/svg/shield.svg" : "icons/svg/sword.svg";
       img.alt = "";
       img.draggable = false;
       slot.append(img);
@@ -886,6 +1126,12 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
 
     const footer = document.createElement("footer");
     footer.className = "th-footer";
+    if (supportsExtraSlots()) {
+      footer.append(this.#makeButton("addSlot", "fa-solid fa-plus", "TOKEN-HANDS.Layout.AddSlot"));
+      if (this.#extraSlots > 0) {
+        footer.append(this.#makeButton("removeSlot", "fa-solid fa-minus", "TOKEN-HANDS.Layout.RemoveSlot"));
+      }
+    }
     footer.append(
       this.#makeButton("resetLayout", "fa-solid fa-arrow-rotate-left", "TOKEN-HANDS.Layout.Reset"),
       this.#makeButton("clearLayout", "fa-solid fa-wand-magic-sparkles", "TOKEN-HANDS.Layout.Clear"),
@@ -907,9 +1153,10 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
     this.#imageInput = this.element.querySelector(".th-image-path");
     this.#slots = {};
     for (const slot of this.element.querySelectorAll(".th-slot")) {
-      const side = slot.dataset.side;
-      this.#slots[side] = slot;
-      slot.addEventListener("pointerdown", (event) => this.#startDrag(side, event));
+      const key = slot.dataset.slotKey;
+      if (!key) continue;
+      this.#slots[key] = slot;
+      slot.addEventListener("pointerdown", (event) => this.#startDrag(key, event));
       slot.addEventListener("pointermove", (event) => this.#moveDrag(event));
       slot.addEventListener("pointerup", (event) => this.#endDrag(event));
       slot.addEventListener("pointercancel", (event) => this.#endDrag(event));
@@ -972,12 +1219,12 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
     if (this.#imageInput) this.#imageInput.value = this.#image;
     if (this.#hpBar) this.#hpBar.style.height = `${this.#barFraction() * 100}%`;
     const pct = this.#slotFraction();
-    for (const side of ["left", "right"]) {
-      const slot = this.#slots[side];
+    for (const key of this.#slotKeys()) {
+      const slot = this.#slots[key];
       if (!slot) continue;
       slot.style.width = `${pct * 100}%`;
       slot.style.height = `${pct * 100}%`;
-      this.#placeSlot(side);
+      this.#placeSlot(key);
     }
   }
 
@@ -985,25 +1232,26 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
     if (this.#gridEl) this.#gridEl.hidden = !this.#grid;
   }
 
-  #placeSlot(side) {
-    const slot = this.#slots[side];
-    const position = this.#positions?.[side];
+  #placeSlot(key) {
+    const slot = this.#slots[key];
+    const position = this.#positions?.[key];
     if (!slot || !position) return;
     const max = 1 - this.#slotFraction();
     const x = clamp(position.x, 0, max);
     const y = clamp(position.y, 0, max);
-    this.#positions[side] = { x, y };
+    this.#positions[key] = { x, y };
     slot.style.left = `${x * 100}%`;
     slot.style.top = `${y * 100}%`;
   }
 
-  #startDrag(side, event) {
+  #startDrag(key, event) {
     if (event.button !== 0 || !this.#preview) return;
     event.preventDefault();
     const rect = this.#preview.getBoundingClientRect();
-    const position = this.#positions[side];
+    const position = this.#positions[key];
+    if (!position) return;
     this.#drag = {
-      side,
+      key,
       pointerId: event.pointerId,
       startX: event.clientX,
       startY: event.clientY,
@@ -1027,13 +1275,15 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
     }
     x = clamp(x, 0, max);
     y = clamp(y, 0, max);
-    this.#positions[drag.side] = { x, y };
-    this.#placeSlot(drag.side);
+    this.#positions[drag.key] = { x, y };
+    this.#placeSlot(drag.key);
 
     if (this.#sync) {
-      const other = drag.side === "left" ? "right" : "left";
-      this.#positions[other] = { x: max - x, y };
-      this.#placeSlot(other);
+      const other = this.#syncKey(drag.key);
+      if (other && this.#positions[other]) {
+        this.#positions[other] = { x: max - x, y };
+        this.#placeSlot(other);
+      }
     }
   }
 
@@ -1060,10 +1310,31 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
   }
 
   /** @this {HandsLayoutConfig} */
+  static #onAddSlot() {
+    if (!supportsExtraSlots()) return;
+    if (this.#extraSlots >= MAX_EXTRA_SLOTS) return;
+    this.#extraSlots += 1;
+    const key = `hand${this.#extraSlots + 1}`;
+    this.#positions[key] = this.#defaultPositionForKey(key);
+    void this.render({ force: true });
+  }
+
+  /** @this {HandsLayoutConfig} */
+  static #onRemoveSlot() {
+    if (!supportsExtraSlots()) return;
+    if (this.#extraSlots <= 0) return;
+    const key = `hand${this.#extraSlots + 1}`;
+    delete this.#positions[key];
+    this.#extraSlots -= 1;
+    void this.render({ force: true });
+  }
+
+  /** @this {HandsLayoutConfig} */
   static #onResetLayout() {
-    const defaults = defaultSlotPositions();
     this.#image = DEFAULT_PREVIEW_IMAGE;
-    this.#positions = { left: { ...defaults.left }, right: { ...defaults.right } };
+    for (const key of this.#slotKeys()) {
+      this.#positions[key] = this.#defaultPositionForKey(key);
+    }
     this.#applyPreview();
   }
 
@@ -1086,11 +1357,10 @@ class HandsLayoutConfig extends foundry.applications.api.ApplicationV2 {
       ui.notifications.warn(game.i18n.localize("TOKEN-HANDS.Layout.MasterOnly"));
       return;
     }
-    const layout = {
-      left: { ...this.#positions.left },
-      right: { ...this.#positions.right },
-      image: this.#image,
-    };
+    const layout = { image: this.#image };
+    for (const key of this.#slotKeys()) {
+      layout[key] = { ...this.#positions[key] };
+    }
     // При общей раскладке мастер сохраняет её и как свою личную, чтобы
     // после выключения опции у него осталось то же расположение.
     if (target === WORLD_SLOT_LAYOUT_SETTING) {
@@ -1110,7 +1380,10 @@ function scheduleRefresh(actor) {
   _pendingActors.add(actor.id);
   if (_flushQueued || !canvas?.ready) return;
   _flushQueued = true;
-  requestAnimationFrame(flushPending);
+  // setTimeout надёжнее requestAnimationFrame: в фоновой вкладке rAF может
+  // не сработать, и _flushQueued останется true, блокируя все следующие
+  // перерисовки до перезагрузки страницы.
+  setTimeout(flushPending, 0);
 }
 
 function flushPending() {
@@ -1161,16 +1434,31 @@ async function renderTokenHands(token) {
   token.handsLayout = { w, h, bar: barOffset };
 
   const hands = handsVisible(token) ? resolveTokenHands(token) : null;
-  if (!hands) return; // нет провайдера, руки пусты или токен вне боя
+  if (!hands?.slots?.length) return; // нет провайдера, руки пусты или токен вне боя
+  const slots = hands.slots;
 
   const sizePct = (game.settings.get(MOD_ID, "sizePercent") ?? 30) / 100;
-  const size = Math.round(Math.max(14, Math.min(w * sizePct, 150)));
+  const baseSize = Math.round(Math.max(14, Math.min(w * sizePct, 150)));
   const pad = Math.max(1, Math.round(w * 0.02));
+  const size = fitSlotSize(slots.length, w, h, baseSize, pad, barOffset);
   const layout = readSlotLayout();
-  const pos = {
-    left: slotPosition(token, "left", layout, w, h, size, pad, barOffset),
-    right: slotPosition(token, "right", layout, w, h, size, pad, barOffset),
-  };
+  const auto = autoSlotPositions(slots, w, h, size, pad, barOffset);
+  const maxX = Math.max(0, w - size);
+  const maxY = Math.max(0, h - size);
+  const pos = slots.map((slot, index) => {
+    const saved = layout?.[slot.key];
+    if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+      return {
+        x: clamp(Math.round(saved.x * w), 0, maxX),
+        y: clamp(Math.round(saved.y * h), 0, maxY),
+      };
+    }
+    if (slots.length <= 2) {
+      const side = slot.key === "right" ? "right" : "left";
+      return slotPosition(token, side, layout, w, h, size, pad, barOffset);
+    }
+    return auto[index] ?? { x: pad, y: h - size - pad - barOffset };
+  });
 
   const sprites = [];
   const discard = () => {
@@ -1179,29 +1467,30 @@ async function renderTokenHands(token) {
     }
   };
 
-  for (const side of ["right", "left"]) {
-    const data = hands[side];
-    if (!data) continue;
+  for (let index = slots.length - 1; index >= 0; index -= 1) {
+    const data = slots[index];
+    const p = pos[index];
+    if (!data || !p) continue;
     if (isStale()) { discard(); return; }
-    const p = pos[side];
+    const key = data.key;
 
     // Рамка: спрайт с canvas-текстурой, напрямую в токене
     const frame = new PIXI.Sprite(getFrameTexture(size, data.dim));
-    frame.name = `hand-${side}-frame`;
+    frame.name = `hand-${key}-frame`;
     frame.width = size;
     frame.height = size;
     frame.position.set(p.x, p.y);
     token.addChild(frame);
     sprites.push(frame);
 
-    makeSlotClickable(frame, data);
+    makeSlotClickable(frame, data, token);
 
     // Иконка предмета
     const texture = await loadIconTexture(data.img, data.fallbacks);
     if (isStale()) { discard(); return; }
     const inset = Math.round(size * 0.14);
     const icon = new PIXI.Sprite(texture);
-    icon.name = `hand-${side}-icon`;
+    icon.name = `hand-${key}-icon`;
     icon.alpha = data.dim ? 0.4 : 1;
     icon.width = size - inset * 2;
     icon.height = size - inset * 2;
@@ -1217,25 +1506,27 @@ async function renderTokenHands(token) {
     sprites.push(icon);
 
     // Кликабельна вся площадь слота, а не только рамка по краям
-    makeSlotClickable(icon, data);
+    makeSlotClickable(icon, data, token);
   }
 
   if (isStale()) { discard(); return; }
   token.handsSprites = sprites;
   if (isDebug()) {
-    console.info(`[${MOD_ID}] слоты «${token.name}» (${hands.providerId}): left=${!!hands.left}, right=${!!hands.right}, size=${size}, спрайтов=${sprites.length}`);
+    console.info(`[${MOD_ID}] слоты «${token.name}» (${hands.providerId}): слотов=${slots.length}, size=${size}, спрайтов=${sprites.length}`);
   }
 }
 
 /**
  * Клик по любой точке слота (рамка + иконка) открывает лист предмета.
- * stopPropagation нужен, чтобы клик по квадрату не выделял и не тащил токен:
- * событие до родителя-токена в этом случае не доходит.
+ * ПКМ вызывает необязательный обработчик провайдера (например, выбор предмета
+ * из инвентаря для руки). stopPropagation нужен, чтобы клик по квадрату не
+ * выделял и не тащил токен.
  */
-function makeSlotClickable(displayObject, data) {
+function makeSlotClickable(displayObject, data, token) {
   const item = data.item;
   const opensSheet = game.settings.get(MOD_ID, "clickOpensSheet") && item;
-  if (!opensSheet) {
+  const hasContextMenu = typeof data.contextMenu === "function";
+  if (!opensSheet && !hasContextMenu) {
     // Квадрат прозрачен для мыши: токен и выделяется, и тащится за любой уголок.
     displayObject.eventMode = "none";
     return;
@@ -1246,10 +1537,18 @@ function makeSlotClickable(displayObject, data) {
 
   let downAt = null;
   displayObject.on("pointerdown", (ev) => {
+    if (ev.button === 2) {
+      ev.stopPropagation();
+      ev.nativeEvent?.preventDefault?.();
+      data.contextMenu?.(ev, data, token);
+      return;
+    }
+    if (!opensSheet) return;
     ev.stopPropagation();
     downAt = { x: ev.global.x, y: ev.global.y };
   });
   displayObject.on("pointertap", (ev) => {
+    if (!opensSheet || ev.button === 2) return;
     ev.stopPropagation();
     if (downAt && Math.hypot(ev.global.x - downAt.x, ev.global.y - downAt.y) > 10) return;
     item.sheet?.render(true);

@@ -39,16 +39,13 @@
       "Save": "Save",
       "Grid": "Grid",
       "Sync": "Sync",
-      "SyncHint": "Move the paired slot mirrored around the token's center",
+      "SyncHint": "Move the other slot mirrored around the token's center",
       "HpBar": "HP",
       "MasterOnly": "The layout is configured by the GM. Only the GM can change it.",
       "Left": "Left hand",
-      "Right": "Right hand",
-      "ExtraSlot": "Extra hand {n}",
-      "AddSlot": "Add slot",
-      "RemoveSlot": "Remove slot"
+      "Right": "Right hand"
     },
-    "NoProvider": "The \"Hands on Token\" base module is enabled, but no system module (PF2e / D&D 5e / Cyberpunk RED) has connected. Squares will appear once one is enabled.",
+    "NoProvider": "The \"Hands on Token\" base module is enabled, but no system module (PF2e / D&D 5e) has connected. Squares will appear once one is enabled.",
     "Unarmed": "Unarmed Strike"
   }
 }
