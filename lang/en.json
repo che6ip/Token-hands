@@ -1,0 +1,54 @@
+{
+  "TOKEN-HANDS": {
+    "Settings": {
+      "Enabled": "Show hands on tokens",
+      "EnabledHint": "Master switch. When off, hand squares are not drawn for anyone, even with a system module connected.",
+      "SizePercent": "Slot size, % of token width",
+      "SizePercentHint": "Size of each hand square as a percent of the token width (15–60).",
+      "AvoidBar": "Shift hands above the HP bar",
+      "AvoidBarHint": "When enabled, slots automatically move above the bottom HP bar while it is visible. When disabled, they may overlap it.",
+      "LayoutGrid": "Grid in the layout editor",
+      "LayoutGridHint": "Shows a grid and snaps slots to it while dragging.",
+      "LayoutSync": "Sync slots",
+      "LayoutSyncHint": "Dragging one slot moves the other mirrored around the token's center.",
+      "ApplyToPlayers": "Configure for players",
+      "ApplyToPlayersHint": "When enabled, the slot layout saved in the editor is applied to all players. When disabled, each user has their own layout.",
+      "OnlyInCombat": "Hand slots only during combat",
+      "OnlyInCombatHint": "Show the squares only for tokens that are in the current scene's initiative. Hidden otherwise.",
+      "ClickOpensSheet": "Clicking a slot opens the item sheet",
+      "ClickOpensSheetHint": "A click anywhere on the square opens the item card. When off, the click only selects and drags the token.",
+      "Debug": "Verbose console output",
+      "DebugHint": "Logs about connected modules and every rendered token — useful for debugging empty slots.",
+      "TokenEnabled": "Show hands on this token",
+      "TokenEnabledHint": "Per-token (or per-prototype) switch. When off, the squares are not drawn even while the module is enabled. If unset, the prototype token value is used, then the module-wide setting.",
+      "PrototypeOverride": "Hands on Token",
+      "LayoutMenu": "Hand layout",
+      "LayoutMenuLabel": "Configure layout",
+      "LayoutMenuHint": "Open the visual editor and drag the hand slots around the token. The setting is personal, but with \"Configure for players\" enabled it is applied to everyone.",
+      "Credits": {
+        "Author": "Author"
+      }
+    },
+    "Layout": {
+      "Title": "Hand Layout",
+      "Hint": "Drag the squares around the token. The green strip at the bottom is the HP bar: if a slot lands on it, it will automatically move above it in game. You can replace the preview background with your own image.",
+      "Image": "Preview background",
+      "Browse": "Browse",
+      "Reset": "Reset",
+      "Clear": "Auto",
+      "Save": "Save",
+      "Grid": "Grid",
+      "Sync": "Sync",
+      "SyncHint": "Move the paired slot mirrored around the token's center",
+      "HpBar": "HP",
+      "MasterOnly": "The layout is configured by the GM. Only the GM can change it.",
+      "Left": "Left hand",
+      "Right": "Right hand",
+      "ExtraSlot": "Extra hand {n}",
+      "AddSlot": "Add slot",
+      "RemoveSlot": "Remove slot"
+    },
+    "NoProvider": "The \"Hands on Token\" base module is enabled, but no system module (PF2e / D&D 5e / Cyberpunk RED) has connected. Squares will appear once one is enabled.",
+    "Unarmed": "Unarmed Strike"
+  }
+}
